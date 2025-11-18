@@ -37,7 +37,7 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
       
       const res = await fetch(url);
       if (!res.ok) {
-         throw new Error(`Backend Error: ${res.status}`);
+         throw new Error(`Backend connection failed (${res.status}). Is main.py running?`);
       }
       
       const data = await res.json();
@@ -48,10 +48,10 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
         setStatus('no-coverage');
         return null;
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error("Backend Fetch Error", e);
       setStatus('error');
-      setErrorMsg("Failed to connect to Backend (Is python main.py running?)");
+      setErrorMsg(e.message || "Failed to connect to Backend");
       return null;
     }
   };
@@ -61,72 +61,93 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
     let isMounted = true;
 
     const loadScene = async () => {
+      // Step A: Wait for Mapillary Script to load from CDN
+      let attempts = 0;
+      while (!window.mapillary && attempts < 50) {
+        await new Promise(r => setTimeout(r, 100));
+        attempts++;
+      }
+
+      if (!window.mapillary) {
+        if (isMounted) {
+            setStatus('error');
+            setErrorMsg("Mapillary JS library failed to load. Check internet connection.");
+        }
+        return;
+      }
+
+      // Step B: Get Image ID from Backend
       const imageId = await findNearestImage(position);
       
       if (!isMounted) return;
-      if (!imageId) return; 
+      if (!imageId) return; // findNearestImage handles status updates for no-coverage/error
 
+      // Step C: Initialize or Move Viewer
       // If viewer exists, just move
       if (viewerRef.current) {
         try {
           await viewerRef.current.moveToKey(imageId);
           setStatus('ready');
         } catch (e) {
-          console.warn("Move failed, might need re-init", e);
-          // Don't fail hard, try to let the viewer recover
+          console.warn("Move failed, recreating viewer...", e);
+          // If move fails, we might need to re-init, fall through to creation
+          viewerRef.current.remove();
+          viewerRef.current = null;
         }
-        return;
       }
 
       // Initialize Viewer if it doesn't exist
-      if (mlyContainerRef.current && window.mapillary) {
+      if (!viewerRef.current && mlyContainerRef.current) {
         setStatus('loading-viewer');
         
-        // CRITICAL FIX: Small timeout to ensure container has dimensions in DOM
-        setTimeout(() => {
+        try {
+          const { Viewer } = window.mapillary;
+          const viewer = new Viewer({
+            accessToken: MAPILLARY_CLIENT_TOKEN,
+            container: mlyContainerRef.current,
+            imageId: imageId,
+            component: {
+              cover: false,
+              marker: true,
+              popup: false, 
+              attribution: true,
+            },
+          });
+
+          viewerRef.current = viewer;
+
+          // Event Listeners
+          viewer.on('image', (node: any) => {
             if (!isMounted) return;
-            
-            try {
-              const { Viewer } = window.mapillary;
-              const viewer = new Viewer({
-                accessToken: MAPILLARY_CLIENT_TOKEN, // Still needed for the client-side viewer
-                container: mlyContainerRef.current,
-                imageId: imageId,
-                component: {
-                  cover: false,
-                  marker: true,
-                  popup: false, 
-                  attribution: true,
-                },
-              });
-    
-              viewerRef.current = viewer;
-    
-              // Event Listeners
-              viewer.on('image', (node: any) => {
-                if (!isMounted) return;
-                if (node && node.image) {
-                  const loc = { lat: node.image.originalLat, lng: node.image.originalLng };
-                  setCurrentImageLoc(loc);
-                  onPositionChange(loc);
-                  setStatus('ready');
-                }
-              });
-              
-              // Force resize on load to prevent black screen
-              viewer.on('load', () => {
-                 if(isMounted) {
-                     setStatus('ready');
-                     viewer.resize(); 
-                 }
-              });
-    
-            } catch (e) {
-              console.error("Viewer Init Error", e);
-              setStatus('error');
-              setErrorMsg("Could not start Mapillary Viewer");
+            if (node && node.image) {
+              const loc = { lat: node.image.originalLat, lng: node.image.originalLng };
+              setCurrentImageLoc(loc);
+              onPositionChange(loc);
+              setStatus('ready');
             }
-        }, 100);
+          });
+          
+          // Force resize on load to prevent black screen
+          viewer.on('load', () => {
+             if(isMounted) {
+                 setStatus('ready');
+                 viewer.resize(); 
+             }
+          });
+          
+          // AGGRESSIVE RESIZE STRATEGY
+          // Fixes black screen caused by container resizing animations
+          setTimeout(() => { if(isMounted) viewer.resize(); }, 200);
+          setTimeout(() => { if(isMounted) viewer.resize(); }, 500);
+          setTimeout(() => { if(isMounted) viewer.resize(); }, 1000);
+
+        } catch (e) {
+          console.error("Viewer Init Error", e);
+          if (isMounted) {
+            setStatus('error');
+            setErrorMsg("Could not start Mapillary Viewer");
+          }
+        }
       }
     };
 
@@ -134,6 +155,8 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
 
     return () => {
       isMounted = false;
+      // We generally want to keep the viewer instance alive during re-renders unless component unmounts entirely
+      // but for safety in this simplified version, we cleanup on unmount
       if (viewerRef.current) {
         viewerRef.current.remove();
         viewerRef.current = null;
@@ -142,12 +165,12 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [position.lat, position.lng]); 
 
-  // Handle Resize observer to keep viewer sized correctly
+  // Handle Container Resize
   useEffect(() => {
       if (!mlyContainerRef.current || !viewerRef.current) return;
       
       const resizeObserver = new ResizeObserver(() => {
-          viewerRef.current?.resize();
+          if (viewerRef.current) viewerRef.current.resize();
       });
       
       resizeObserver.observe(mlyContainerRef.current);
@@ -156,6 +179,7 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
   }, []);
 
   const handleRetry = () => {
+    // Force a reload of the effect by toggling a dummy state or just reloading page
     window.location.reload(); 
   };
 
@@ -171,11 +195,12 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
   return (
     <div className="relative w-full h-full bg-gray-900 group overflow-hidden">
       
-      {/* Mapillary Container - Always visible to ensure rendering context */}
+      {/* Mapillary Container */}
       <div 
         ref={mlyContainerRef} 
         id="mly" 
         className="w-full h-full relative z-10"
+        style={{ minHeight: '100px' }} // Ensure it has height
       />
 
       {/* Annotation Overlay */}
@@ -218,12 +243,14 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
 
       {/* Loading / Error States (Overlaid on top) */}
       {status !== 'ready' && (
-        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-gray-900/80 backdrop-blur-sm text-white p-6 text-center">
+        <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-gray-900/90 backdrop-blur-sm text-white p-6 text-center">
           
           {(status === 'searching' || status === 'loading-viewer') && (
             <div className="animate-fadeIn flex flex-col items-center">
               <Loader2 className="w-10 h-10 animate-spin text-emerald-500 mb-4" />
-              <p className="text-lg font-medium">Contacting Backend...</p>
+              <p className="text-lg font-medium">
+                 {status === 'searching' ? 'Searching nearby imagery...' : 'Loading Street View...'}
+              </p>
             </div>
           )}
 
@@ -232,7 +259,7 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
               <AlertTriangle className="w-12 h-12 text-orange-500 mx-auto mb-4" />
               <h3 className="text-xl font-bold mb-2">No Street View Here</h3>
               <p className="text-gray-400 mb-6">
-                The backend could not find imagery near this location.
+                Our backend found no Mapillary imagery within 100m of this point. Try clicking a major road.
               </p>
             </div>
           )}
@@ -242,12 +269,20 @@ export const StreetView: React.FC<StreetViewProps> = ({ position, onPositionChan
               <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
               <h3 className="text-xl font-bold mb-2">Connection Error</h3>
               <p className="text-gray-400 mb-6">{errorMsg || "Something went wrong"}</p>
-              <button 
-                onClick={handleRetry}
-                className="bg-emerald-600 hover:bg-emerald-700 px-6 py-2 rounded-lg font-bold flex items-center gap-2 mx-auto"
-              >
-                <RefreshCw className="w-4 h-4" /> Retry
-              </button>
+              <div className="flex gap-2 justify-center">
+                <button 
+                    onClick={() => setStatus('searching')}
+                    className="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded-lg font-bold transition-colors"
+                >
+                    Dismiss
+                </button>
+                <button 
+                    onClick={handleRetry}
+                    className="bg-emerald-600 hover:bg-emerald-700 px-6 py-2 rounded-lg font-bold flex items-center gap-2"
+                >
+                    <RefreshCw className="w-4 h-4" /> Retry
+                </button>
+              </div>
             </div>
           )}
         </div>

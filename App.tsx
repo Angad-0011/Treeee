@@ -37,8 +37,6 @@ const App: React.FC = () => {
             lng: position.coords.longitude,
           };
           setUserLocation(loc);
-          // If it's the first load, maybe set SV position close to user?
-          // We keep default center for now to ensure data visibility in NYC demo
         },
         (error) => console.error('Error getting location', error),
         { enableHighAccuracy: true }
@@ -123,7 +121,7 @@ const App: React.FC = () => {
       
       {/* Street View Panel (Visible only in street mode) */}
       {viewMode === 'street' && (
-        <div className="w-full h-1/2 md:h-full md:w-3/5 relative border-b-4 md:border-b-0 md:border-r-4 border-emerald-600 z-10">
+        <div className="w-full h-1/2 md:h-full md:w-3/5 relative border-b-4 md:border-b-0 md:border-r-4 border-emerald-600 z-10 bg-black shadow-2xl">
            <StreetView 
              position={streetViewPos}
              onPositionChange={setStreetViewPos}
