@@ -1,0 +1,7 @@
+{
+  "name": "Canopy Count",
+  "description": "A community-driven tree annotation platform inspired by Project Sidewalk. Map trees, track health, and export data.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
